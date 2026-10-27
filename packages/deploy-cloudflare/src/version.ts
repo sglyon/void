@@ -16,12 +16,6 @@ import {
 } from './execute.ts';
 import type { CloudflareUploadResult } from './operations.ts';
 import { isVoidSecretOnlyDraft, isWranglerSecretOnlyDraft } from './secret-draft.ts';
-import {
-  configuredWorkerSettings,
-  mergeWorkerSettings,
-  parseWorkerSettings,
-  type CloudflareWorkerSettings,
-} from './worker-settings.ts';
 
 const DURABLE_MIGRATION_VERSION_ERROR = 10211;
 const CLOUDFLARE_SECRET_CHANGED_ERROR = 10220;
@@ -39,29 +33,32 @@ export type CloudflareVersionMetadata =
       contentHash?: string;
     }>;
 
-export type CloudflareTriggerConfig = CloudflareWorkerSettings &
-  Readonly<{
-    /** This version retained the existing triggers instead of publishing a snapshot. */
-    preserve?: boolean;
-    preserveRoutes?: boolean;
-    preserveWorkersDev?: boolean;
-    preservePreviewUrls?: boolean;
-    /** Fingerprint of explicit non-versioned settings while remote triggers stay opaque. */
-    settingsHash?: string;
-    workers_dev: boolean;
-    preview_urls: boolean;
-    routes: ReadonlyArray<unknown>;
-    crons: ReadonlyArray<unknown>;
-    queueConsumers: ReadonlyArray<unknown>;
-    workflows: ReadonlyArray<unknown>;
-    /**
-     * Email Routing addresses (`addresses` in Wrangler config). Wrangler 4.131 applies its
-     * Email Routing plan inside `triggers deploy` — `undefined` skips the plan entirely, while
-     * `[]` is a destructive plan that deletes every rule this Worker owns — so the two must stay
-     * distinct through the snapshot. Absent from annotations written before this field existed.
-     */
-    addresses?: ReadonlyArray<string>;
-  }>;
+export type CloudflareTriggerConfig = Readonly<{
+  /** This version retained the existing triggers instead of publishing a snapshot. */
+  preserve?: boolean;
+  preserveRoutes?: boolean;
+  preserveWorkersDev?: boolean;
+  preservePreviewUrls?: boolean;
+  /** Fingerprint of explicit non-versioned settings while remote triggers stay opaque. */
+  settingsHash?: string;
+  /** Explicit Worker-wide observability settings, published after version activation. */
+  observability?: Readonly<Record<string, unknown>>;
+  /** Explicit Worker-wide Logpush setting, published after version activation. */
+  logpush?: boolean;
+  workers_dev: boolean;
+  preview_urls: boolean;
+  routes: ReadonlyArray<unknown>;
+  crons: ReadonlyArray<unknown>;
+  queueConsumers: ReadonlyArray<unknown>;
+  workflows: ReadonlyArray<unknown>;
+  /**
+   * Email Routing addresses (`addresses` in Wrangler config). Wrangler 4.131 applies its
+   * Email Routing plan inside `triggers deploy` — `undefined` skips the plan entirely, while
+   * `[]` is a destructive plan that deletes every rule this Worker owns — so the two must stay
+   * distinct through the snapshot. Absent from annotations written before this field existed.
+   */
+  addresses?: ReadonlyArray<string>;
+}>;
 
 export type CloudflareTrafficConfig = Pick<
   CloudflareTriggerConfig,
@@ -204,7 +201,7 @@ export function parseCloudflareVersionMessage(
 
 /**
  * Capture shared configuration published after activation: routes, workers.dev / preview flags,
- * crons, queue consumers, workflows, Email Routing addresses, and explicit logging settings.
+ * crons, queue consumers, workflows, Email Routing addresses, and explicit observability.
  */
 export function readCloudflareTriggerConfig(
   configPath: string,
@@ -243,8 +240,6 @@ export async function deployCloudflareVersionTriggers(options: {
   /** cf skips an empty Cron Trigger set, so the caller may publish it directly. */
   publishEmptyCrons?: () => Promise<CloudflareCommandResult>;
   manageRoutes?: boolean;
-  expectedVersionId?: string;
-  restoreWorkerSettings?: boolean;
 }): Promise<CloudflareCommandResult> {
   if (options.triggerConfig.preserve) {
     return { status: 0, stdout: '', stderr: '' };
@@ -316,43 +311,10 @@ export async function deployCloudflareVersionTriggers(options: {
         return published;
       }
     }
-    return applyWorkerSettings(options);
+    return deployed;
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
-}
-
-async function applyWorkerSettings(options: {
-  runWrangler: CloudflareCommandRunner;
-  workerName: string;
-  configPath?: string;
-  triggerConfig: CloudflareTriggerConfig;
-  previousTriggerConfig?: CloudflareTriggerConfig;
-  expectedVersionId?: string;
-  restoreWorkerSettings?: boolean;
-}): Promise<CloudflareCommandResult> {
-  const settings = configuredWorkerSettings(options.triggerConfig);
-  if (Object.keys(settings).length === 0) {
-    return { status: 0, stdout: '', stderr: '' };
-  }
-  const previous = configuredWorkerSettings(options.previousTriggerConfig ?? {});
-  const expectedSettings = Object.fromEntries(
-    Object.keys(settings)
-      .filter((key) => previous[key as keyof CloudflareWorkerSettings] !== undefined)
-      .map((key) => [key, previous[key as keyof CloudflareWorkerSettings]]),
-  );
-  return options.runWrangler(
-    {
-      type: 'worker.settings.apply',
-      replace: options.restoreWorkerSettings,
-      workerName: options.workerName,
-      configPath: options.configPath,
-      settings,
-      ...(Object.keys(expectedSettings).length ? { expectedSettings } : {}),
-      expectedVersionId: options.expectedVersionId,
-    },
-    { capture: true },
-  );
 }
 
 function pickWranglerTriggerContext(source: Record<string, unknown>): Record<string, unknown> {
@@ -398,9 +360,7 @@ export async function stabilizeCloudflareVersionTriggers(options: {
   publishEmptyCrons?: () => Promise<CloudflareCommandResult>;
   manageRoutes?: boolean;
   attempts?: number;
-  restoreWorkerSettings?: boolean;
 }): Promise<CloudflareTriggerStabilization> {
-  let settingsBaseline = configuredWorkerSettings(options.previousTriggerConfig ?? {});
   let cleanupBaseline = mergeTriggerCleanupBaselines(
     options.previousTriggerConfig,
     options.targetTriggerConfig,
@@ -437,9 +397,7 @@ export async function stabilizeCloudflareVersionTriggers(options: {
       workerName: options.workerName,
       configPath: options.configPath,
       triggerConfig: activeTriggerConfig,
-      previousTriggerConfig: { ...cleanupBaseline, ...settingsBaseline },
-      expectedVersionId: activeVersionId,
-      restoreWorkerSettings: options.restoreWorkerSettings,
+      previousTriggerConfig: cleanupBaseline,
       publishEmptyCustomDomains: options.publishEmptyCustomDomains,
       publishEmptyCrons: options.publishEmptyCrons,
       manageRoutes: options.manageRoutes,
@@ -453,10 +411,6 @@ export async function stabilizeCloudflareVersionTriggers(options: {
       };
     }
 
-    settingsBaseline = mergeWorkerSettings(
-      settingsBaseline,
-      configuredWorkerSettings(activeTriggerConfig),
-    );
     cleanupBaseline = mergeTriggerCleanupBaselines(cleanupBaseline, activeTriggerConfig);
     const after = await readCurrentProductionVersion(options);
     if (after.kind === 'failed') {
@@ -648,8 +602,8 @@ function triggerConfigFromWrangler(config: Record<string, unknown>): CloudflareT
     ...(config.workers_dev === undefined ? { preserveWorkersDev: true } : {}),
     ...(config.preview_urls === undefined ? { preservePreviewUrls: true } : {}),
     settingsHash: nonVersionedSettingsHash(config),
-    ...(typeof config.logpush === 'boolean' ? { logpush: config.logpush } : {}),
     ...(isRecord(config.observability) ? { observability: config.observability } : {}),
+    ...(typeof config.logpush === 'boolean' ? { logpush: config.logpush } : {}),
     workers_dev: workersDev,
     preview_urls: typeof config.preview_urls === 'boolean' ? config.preview_urls : workersDev,
     routes,
@@ -713,8 +667,8 @@ function parseTriggerConfig(value: unknown): CloudflareTriggerConfig | null {
     ...(value.preserveWorkersDev === true ? { preserveWorkersDev: true } : {}),
     ...(value.preservePreviewUrls === true ? { preservePreviewUrls: true } : {}),
     ...(typeof value.settingsHash === 'string' ? { settingsHash: value.settingsHash } : {}),
-    ...(typeof value.logpush === 'boolean' ? { logpush: value.logpush } : {}),
     ...(isRecord(value.observability) ? { observability: value.observability } : {}),
+    ...(typeof value.logpush === 'boolean' ? { logpush: value.logpush } : {}),
     workers_dev: value.workers_dev,
     preview_urls: value.preview_urls,
     routes: value.routes,
@@ -736,10 +690,10 @@ function triggerWranglerConfig(
   queues.consumers = [...triggerConfig.queueConsumers];
   const config: Record<string, unknown> = {
     ...base,
-    ...(triggerConfig.logpush === undefined ? {} : { logpush: triggerConfig.logpush }),
     ...(triggerConfig.observability === undefined
       ? {}
       : { observability: triggerConfig.observability }),
+    ...(triggerConfig.logpush === undefined ? {} : { logpush: triggerConfig.logpush }),
     triggers,
     queues,
     workflows: [...triggerConfig.workflows],
@@ -776,8 +730,8 @@ function resolvePreservedTraffic(
   return {
     ...(desired.preserve ? { preserve: true } : {}),
     ...(desired.settingsHash ? { settingsHash: desired.settingsHash } : {}),
-    ...(desired.logpush === undefined ? {} : { logpush: desired.logpush }),
     ...(desired.observability === undefined ? {} : { observability: desired.observability }),
+    ...(desired.logpush === undefined ? {} : { logpush: desired.logpush }),
     workers_dev: desired.preserveWorkersDev
       ? (previous?.workers_dev ?? desired.workers_dev)
       : desired.workers_dev,
@@ -881,7 +835,6 @@ export type CloudflareVersionActivationOptions = {
 
 type InternalCloudflareVersionActivationOptions = CloudflareVersionActivationOptions & {
   candidateSecretsFilePath?: string;
-  liveWorkerSettings?: CloudflareWorkerSettings;
 };
 
 /** Upload, probe, and atomically activate a verified Worker Version. */
@@ -1101,41 +1054,10 @@ async function activateCloudflareVersionWithSecretsFile(
       : options.message;
   const versionedPreviousTriggerConfig =
     previousMetadata?.schema === 2 ? previousMetadata.triggerConfig : undefined;
-  let versionedPreviousTriggerConfigWithTraffic =
+  const versionedPreviousTriggerConfigWithTraffic =
     versionedPreviousTriggerConfig && previousTrafficConfig
       ? { ...versionedPreviousTriggerConfig, ...previousTrafficConfig }
       : versionedPreviousTriggerConfig;
-  const desiredSettings = configuredWorkerSettings(desiredTriggerConfig);
-  if (
-    previousVersionId &&
-    !options.preserveTriggers &&
-    !desiredTriggerConfig.preserve &&
-    (Object.keys(desiredSettings).length > 0 ||
-      Object.keys(configuredWorkerSettings(versionedPreviousTriggerConfig ?? {})).length > 0)
-  ) {
-    const captured = await options.runWrangler(
-      {
-        type: 'worker.settings.read',
-        configPath: options.configPath,
-        workerName: options.workerName,
-      },
-      { capture: true },
-    );
-    const live = isCleanCommandExit(captured) ? parseWorkerSettings(captured.data) : null;
-    if (!live) {
-      return {
-        ok: false,
-        reason: 'status-failed',
-        status: captured.status,
-        diagnostic: 'The live Worker settings could not be captured before deployment.',
-      };
-    }
-    options = { ...options, liveWorkerSettings: live };
-    versionedPreviousTriggerConfigWithTraffic = {
-      ...(versionedPreviousTriggerConfigWithTraffic ?? { ...desiredTriggerConfig, preserve: true }),
-      ...live,
-    };
-  }
   const previousTriggerConfig = triggerConfigWithQueueConsumerCleanup(
     versionedPreviousTriggerConfigWithTraffic,
     options.queueConsumerCleanup,
@@ -1761,20 +1683,7 @@ async function restorePreviousVersionAndTriggers(
   // A preserve marker leaves routes, schedules, queue consumers and workflows opaque, so there
   // is no trigger snapshot to restore. Traffic is already back on the previous version.
   if (targetTriggerConfig.preserve) {
-    const settings = await applyWorkerSettings({
-      ...options,
-      triggerConfig: targetTriggerConfig,
-      previousTriggerConfig: {
-        ...failedTriggerConfig,
-        ...mergeWorkerSettings(
-          configuredWorkerSettings(targetTriggerConfig),
-          configuredWorkerSettings(failedTriggerConfig),
-        ),
-      },
-      expectedVersionId: previousVersionId,
-      restoreWorkerSettings: true,
-    });
-    return { ...traffic, rollback: isCleanCommandExit(settings) ? 'unavailable' : 'failed' };
+    return { ...traffic, rollback: 'unavailable' };
   }
   if (!options.verifyUploader()) {
     return { ...traffic, rollback: 'unsafe' };
@@ -1785,14 +1694,7 @@ async function restorePreviousVersionAndTriggers(
     configPath: options.configPath,
     targetVersionId: previousVersionId,
     targetTriggerConfig,
-    restoreWorkerSettings: true,
-    previousTriggerConfig: {
-      ...failedTriggerConfig,
-      ...mergeWorkerSettings(
-        configuredWorkerSettings(targetTriggerConfig),
-        configuredWorkerSettings(failedTriggerConfig),
-      ),
-    },
+    previousTriggerConfig: failedTriggerConfig,
     knownTriggerConfigs: { [previousVersionId]: targetTriggerConfig },
     publishEmptyCustomDomains: options.publishEmptyCustomDomains,
     publishEmptyCrons: options.publishEmptyCrons,
@@ -2036,46 +1938,12 @@ async function bootstrapFirstDeployment(
       };
     }
   }
-  // Native deploy also publishes provider defaults; preserve live settings until our explicit phase.
-  let preserveWorkerSettings = options.liveWorkerSettings;
-  if (previousVersionId && !preserveWorkerSettings) {
-    const captured = await options.runWrangler(
-      {
-        type: 'worker.settings.read',
-        configPath: options.configPath,
-        workerName: options.workerName,
-      },
-      { capture: true },
-    );
-    preserveWorkerSettings = isCleanCommandExit(captured)
-      ? (parseWorkerSettings(captured.data) ?? undefined)
-      : undefined;
-    if (!preserveWorkerSettings) {
-      return {
-        ok: false,
-        reason: 'status-failed',
-        status: captured.status,
-        diagnostic: 'The live Worker settings could not be preserved before publication.',
-      };
-    }
-  }
-  if (previousVersionId && preserveWorkerSettings) {
-    const desired = desiredTriggerConfigFor(
-      parseCloudflareVersionMessage(options.message),
-      options.configPath,
-    );
-    previousTriggerConfig = {
-      ...(previousTriggerConfig ?? { ...desired, preserve: true }),
-      ...preserveWorkerSettings,
-    };
-  }
   options.onProgress?.(
     atomic ? 'Publishing the Worker atomically...' : 'Publishing the first Worker deployment...',
   );
   const bootstrap = await options.runWrangler(
     {
       type: 'worker.deploy',
-      preserveWorkerSettings,
       configPath: options.configPath,
       workerName: options.workerName,
       message: options.message,

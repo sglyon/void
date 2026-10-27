@@ -341,12 +341,15 @@ it(
 // This exercises multiple fresh cf subprocesses. Windows CI has exceeded 30s
 // across those startups; bound each child and give the complete protocol a
 // separate Windows budget, including assertion and cleanup overhead.
-it.each([false, true])(
-  'uploads an API-origin revision with verified Worker settings (reject first settings write=%s)',
-  async (rejectFirstSettingsWrite) => {
+it.each([
+  { observability: { enabled: true, logs: { enabled: true }, traces: { enabled: true } } },
+  { logpush: false },
+  { logpush: true },
+])(
+  'uploads an API-origin revision and publishes its explicit Worker settings: %j',
+  async (settings) => {
     const current = '11111111-1111-4111-8111-111111111111';
     const next = '22222222-2222-4222-8222-222222222222';
-    const observability = { enabled: true, logs: { enabled: true }, traces: { enabled: true } };
     const triggerConfig = {
       workers_dev: true,
       preview_urls: true,
@@ -354,13 +357,11 @@ it.each([false, true])(
       crons: [],
       queueConsumers: [],
       workflows: [],
-      observability,
-      logpush: false,
+      ...settings,
     };
     const message = encodeCloudflareVersionMessage([], triggerConfig);
     const prepared = await output({
-      observability,
-      logpush: false,
+      ...settings,
       secrets: { required: ['AUTH_SECRET'] },
       version_metadata: { binding: 'APP_VERSION' },
       send_email: [
@@ -373,9 +374,6 @@ it.each([false, true])(
     });
     const originalConfig = readFileSync(getWorkerConfigPath(prepared.directory), 'utf8');
     let traffic = [{ version_id: current, percentage: 100 }];
-    let liveLogpush = true;
-    let settingsWrites = 0;
-    let liveObservability: unknown = { enabled: false };
     let uploaded = false;
     const events: Array<string> = [];
     const requests: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
@@ -393,16 +391,9 @@ it.each([false, true])(
       requests.push(row);
       const path = new URL(row.path, 'http://localhost').pathname;
       let result: unknown;
-      if (row.method === 'GET' && path.endsWith('/script-settings')) {
-        result = { logpush: liveLogpush, observability: liveObservability };
-      } else if (row.method === 'PATCH' && path.endsWith('/script-settings')) {
-        settingsWrites++;
-        expect(traffic).toEqual([
-          { version_id: settingsWrites === 1 ? next : current, percentage: 100 },
-        ]);
-        liveLogpush = Boolean(row.body.logpush);
+      if (row.method === 'PATCH' && path.endsWith('/script-settings')) {
+        expect(traffic).toEqual([{ version_id: next, percentage: 100 }]);
         events.push('settings');
-        liveObservability = row.body.observability;
         result = row.body;
       } else if (row.method === 'POST' && path.endsWith('/workers/workers/void-test/versions')) {
         uploaded = true;
@@ -438,9 +429,8 @@ it.each([false, true])(
         response.end('Unexpected local test request');
         return;
       }
-      const rejected = rejectFirstSettingsWrite && row.method === 'PATCH' && settingsWrites === 1;
-      response.writeHead(rejected ? 403 : 200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ success: !rejected, errors: [], messages: [], result }));
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ success: true, errors: [], messages: [], result }));
     });
     const apiBaseUrl = await listen(server);
     try {
@@ -504,30 +494,6 @@ it.each([false, true])(
           return Response.json({ ready: true, versionId: next });
         },
       });
-      if (rejectFirstSettingsWrite) {
-        expect(result, JSON.stringify({ result, events, requests })).toMatchObject({
-          ok: false,
-          reason: 'triggers-failed',
-          rollback: 'succeeded',
-        });
-        expect(traffic).toEqual([{ version_id: current, percentage: 100 }]);
-        expect(liveLogpush).toBe(true);
-        expect(liveObservability).toMatchObject({ enabled: false });
-        expect(requests.filter(({ method }) => method === 'PATCH').map(({ body }) => body)).toEqual(
-          [
-            { logpush: false, observability },
-            {
-              logpush: true,
-              observability: {
-                enabled: false,
-                logs: { enabled: false },
-                traces: { enabled: false },
-              },
-            },
-          ],
-        );
-        return;
-      }
       expect(result, JSON.stringify({ result, events, requests })).toMatchObject({
         ok: true,
         versionId: next,
@@ -568,7 +534,7 @@ it.each([false, true])(
         {
           method: 'PATCH',
           path: '/client/v4/accounts/account-id/workers/scripts/void-test/script-settings',
-          body: { logpush: false, observability },
+          body: settings,
         },
       ]);
       expect(events.indexOf('activate')).toBeLessThan(events.indexOf('settings'));
@@ -2202,7 +2168,6 @@ it.each([false, true])(
       secrets: { required: ['AUTH_SECRET'] },
     });
     const events: Array<string> = [];
-    let liveObservability: unknown = { enabled: false };
     let active = current;
     let published = false;
     const server = createServer(async (request, response) => {
@@ -2215,7 +2180,6 @@ it.each([false, true])(
           chunks.push(Buffer.from(chunk));
         }
         expect(JSON.parse(Buffer.concat(chunks).toString())).toEqual({ observability });
-        liveObservability = observability;
         expect(active).toBe(next);
         events.push('settings');
       }
@@ -2230,13 +2194,9 @@ it.each([false, true])(
         JSON.stringify({
           success: true,
           errors: [],
-          result: request.url?.endsWith('/script-settings')
-            ? { logpush: false, observability: liveObservability }
-            : request.url?.endsWith('/deployments')
-              ? { deployments: [{ versions: [{ version_id: active, percentage: 100 }] }] }
-              : upload
-                ? { id: next, urls: [] }
-                : { id: current, bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }] },
+          result: upload
+            ? { id: next, urls: [] }
+            : { id: current, bindings: [{ name: 'AUTH_SECRET', type: 'secret_text' }] },
         }),
       );
     });
@@ -2703,7 +2663,6 @@ it.each([
 ])(
   'publishes explicit observability with the real cf trigger transport: $label',
   async ({ observability, rejected }) => {
-    let liveObservability: unknown = { enabled: !observability?.enabled };
     const prepared = await output({ workers_dev: false, preview_urls: false, observability });
     const requests: Array<{ method: string; path: string; body: unknown; authorization?: string }> =
       [];
@@ -2721,18 +2680,13 @@ it.each([
           authorization: request.headers.authorization,
         });
         const failed = rejected && request.method === 'PATCH';
-        if (request.method === 'PATCH' && !failed) {
-          liveObservability = observability;
-        }
         response.writeHead(failed ? 403 : 200, { 'Content-Type': 'application/json' });
         response.end(
           JSON.stringify({
             success: !failed,
-            result: request.url?.endsWith('/script-settings')
-              ? { logpush: false, observability: liveObservability }
-              : request.url?.endsWith('/workers/subdomain')
-                ? { subdomain: 'fixture' }
-                : { subdomain: { enabled: false, previews_enabled: false }, observability },
+            result: request.url?.endsWith('/workers/subdomain')
+              ? { subdomain: 'fixture' }
+              : { subdomain: { enabled: false, previews_enabled: false }, observability },
           }),
         );
       }),
@@ -3294,42 +3248,6 @@ it('uploads when existing R2 and Queue bindings are verified by exact identity',
         '--env=',
       ],
     ]);
-  } finally {
-    prepared.dispose();
-  }
-});
-
-it('preserves live logging in a private ordinary deploy artifact until settings reconciliation', async () => {
-  const prepared = await output({ logpush: false, observability: { enabled: true } });
-  const original = readFileSync(getWorkerConfigPath(prepared.directory), 'utf8');
-  const captured = { logpush: true, observability: { enabled: false } };
-  let deployed = false;
-  try {
-    const runner = createCfVersionRunner({
-      output: prepared,
-      workerName: 'void-test',
-      verifyResources: async () => ({ status: 0, stdout: '', stderr: '' }),
-      runCf: async (args, options) => {
-        expect(args.slice(0, 2)).toEqual(['deploy', '--prebuilt']);
-        expect(options.cwd).not.toBe(prepared.directory);
-        const built = await readBuildOutput(options.cwd);
-        expect(built.workers.default.config).toMatchObject(captured);
-        deployed = true;
-        return {
-          status: 0,
-          stdout: 'Worker Version ID: 22222222-2222-4222-8222-222222222222',
-          stderr: '',
-        };
-      },
-    });
-    expect(
-      await runner(
-        { type: 'worker.deploy', workerName: 'void-test', preserveWorkerSettings: captured },
-        { capture: true },
-      ),
-    ).toMatchObject({ status: 0 });
-    expect(deployed).toBe(true);
-    expect(readFileSync(getWorkerConfigPath(prepared.directory), 'utf8')).toBe(original);
   } finally {
     prepared.dispose();
   }

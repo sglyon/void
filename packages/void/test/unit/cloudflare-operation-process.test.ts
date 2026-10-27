@@ -105,22 +105,26 @@ function runOperation(
   });
 }
 
-it.each([true, false])(
-  'publishes and verifies explicit settings through the operation transport (enabled=%s)',
-  async (enabled) => {
+it.each([
+  { observability: { enabled: true } },
+  { observability: { enabled: false } },
+  { logpush: true },
+  { logpush: false },
+  { observability: { enabled: false }, logpush: false },
+])(
+  'publishes explicit Worker settings from the trigger operation: %j',
+  async (settings) => {
     const directory = temporaryDirectory('void-cf-observability-');
     const configPath = join(directory, 'wrangler.json');
-    const observability = { enabled, logs: { enabled }, traces: { enabled } };
     writeFileSync(
       configPath,
       JSON.stringify({
         name: 'test-worker',
         workers_dev: false,
         preview_urls: false,
-        observability,
+        ...settings,
       }),
     );
-    let liveObservability: unknown = { enabled: !enabled };
     const patches: Array<{ path: string; body: unknown; authorization?: string }> = [];
     const api = await listen(
       createServer(async (request, response) => {
@@ -129,7 +133,6 @@ it.each([true, false])(
           chunks.push(Buffer.from(chunk));
         }
         if (request.method === 'PATCH') {
-          liveObservability = observability;
           patches.push({
             path: request.url ?? '',
             body: JSON.parse(Buffer.concat(chunks).toString()),
@@ -140,11 +143,9 @@ it.each([true, false])(
         response.end(
           JSON.stringify({
             success: true,
-            result: request.url?.endsWith('/script-settings')
-              ? { logpush: false, observability: liveObservability }
-              : request.url?.endsWith('/workers/subdomain')
-                ? { subdomain: 'fixture' }
-                : { subdomain: { enabled: false, previews_enabled: false }, observability },
+            result: request.url?.endsWith('/workers/subdomain')
+              ? { subdomain: 'fixture' }
+              : { subdomain: { enabled: false, previews_enabled: false }, ...settings },
           }),
         );
       }),
@@ -152,8 +153,7 @@ it.each([true, false])(
     const output = await runOperation(
       directory,
       {
-        type: 'worker.settings.apply',
-        settings: { observability },
+        type: 'triggers.deploy',
         workerName: 'test-worker',
         configPath,
       },
@@ -163,7 +163,7 @@ it.each([true, false])(
     expect(patches).toEqual([
       {
         path: '/client/v4/accounts/test-account/workers/scripts/test-worker/script-settings',
-        body: { observability },
+        body: settings,
         authorization: 'Bearer synthetic-token',
       },
     ]);

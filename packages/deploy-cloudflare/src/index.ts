@@ -54,13 +54,6 @@ export {
 export { createCloudflareMetadataRunner } from './metadata.ts';
 export { cloudflareCommandDiagnostic } from './diagnostics.ts';
 export { VOID_SECRET_DRAFT_SOURCE } from './secret-draft.ts';
-export {
-  configuredWorkerSettings,
-  parseWorkerSettings,
-  workerSettingsMatch,
-  mergeWorkerSettings,
-  type CloudflareWorkerSettings,
-} from './worker-settings.ts';
 
 export type {
   CloudflareOperation,

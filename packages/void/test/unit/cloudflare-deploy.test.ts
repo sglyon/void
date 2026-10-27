@@ -3521,9 +3521,6 @@ describe('runCloudflareDeploy — secrets gate', () => {
           ],
         };
       }
-      if (operation.type === 'worker.settings.read') {
-        return { ...cleanExit, data: { logpush: false, observability: { enabled: false } } };
-      }
       if (operation.type === 'versions.upload') {
         return {
           ...cleanExit,
@@ -3582,13 +3579,7 @@ describe('runCloudflareDeploy — secrets gate', () => {
           (type) =>
             type !== 'auth.whoami' && type !== 'deployments.status' && type !== 'versions.list',
         ),
-    ).toEqual([
-      'versions.upload',
-      'worker.settings.read',
-      'worker.deploy',
-      'triggers.deploy',
-      'triggers.clear-crons',
-    ]);
+    ).toEqual(['versions.upload', 'worker.deploy', 'triggers.deploy', 'triggers.clear-crons']);
     expect(active).toBe(next);
   });
 });

@@ -106,15 +106,6 @@ void project rollback
 
 Cloudflare logs use a live tail; team platforms retain log history. Before rolling back, check that the earlier code works with your current database schema. See [Project commands](../reference/cli/project.md).
 
-For your own Cloudflare account, configure `cloudflare.logpush` and
-`cloudflare.observability` in `void.config.ts`. Omitted settings retain their live values;
-explicit `false` values disable the corresponding feature. These settings apply to the
-whole Worker, including every active version. Deploy verifies settings updates and attempts
-to restore the pre-deployment values if publication fails. If another deployment or operator
-changes the captured state, Void stops recovery rather than overwriting that change.
-Enabling [Logpush](https://developers.cloudflare.com/workers/observability/logs/logpush/)
-requires Workers Paid.
-
 ## Other runtimes
 
 Build a standalone server for [Node.js, Bun, or Deno](../integrations/nodejs-bun-deno.md) using the `target` setting. Deploy `dist/ssr` and `dist/client` together using your own hosting. Cloudflare bindings such as D1, KV, R2, and Workers AI are unavailable on these targets.

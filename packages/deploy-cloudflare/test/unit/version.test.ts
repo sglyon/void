@@ -62,9 +62,6 @@ function sdkDraftActivation(source: Record<string, unknown> = voidSecretDraftVer
       if (operation.type === 'deployments.status') {
         return { ...ok(), data: { versions: traffic } };
       }
-      if (operation.type === 'worker.settings.read') {
-        return { ...ok(), data: { logpush: false, observability: { enabled: false } } };
-      }
       if (operation.type === 'versions.list') {
         return {
           ...ok(),
@@ -216,7 +213,6 @@ function runner(overrides?: {
   triggerRollback?: CloudflareCommandResult;
   rollback?: CloudflareCommandResult;
   versions?: CloudflareCommandResult;
-  settings?: CloudflareCommandResult;
 }) {
   let deployCalls = 0;
   let triggerCalls = 0;
@@ -227,12 +223,6 @@ function runner(overrides?: {
   ];
   let uploaded = false;
   return operationFixture((args: Array<string>) => {
-    if (args[0] === 'worker' && args[1] === 'settings') {
-      return args[2] === 'read'
-        ? (overrides?.settings ??
-            ok(JSON.stringify({ logpush: false, observability: { enabled: false } })))
-        : ok();
-    }
     if (args[0] === 'deployments') {
       statusCalls++;
       if (statusCalls === 1 && overrides?.status) {
@@ -716,38 +706,34 @@ describe('Cloudflare version activation', () => {
     expect(fixture.events).toContain('upload');
   });
 
-  it.each([{}, { logpush: false }, { observability: { enabled: false } }])(
-    'publishes explicitly atomic Durable Object deployments with optional live settings: %j',
-    async (settings) => {
-      const runWrangler = runner({
-        bootstrap: ok(`Worker Version ID: ${NEXT}\nhttps://my-worker.example.workers.dev`),
-        settings: ok(JSON.stringify(settings)),
-      });
-      const result = await activateCloudflareVersion({
-        runWrangler,
-        workerName: 'my-worker',
-        verifyUploader: () => true,
-        verifyInheritedSecrets: true,
-        atomic: true,
-        workersDevSubdomain: 'example',
-        message: encodeCloudflareVersionMessage([]),
-        fetch: async () => Response.json({ ready: true }),
-      });
-      expect(result).toMatchObject({
-        ok: true,
-        versionId: NEXT,
-        previousVersionId: CURRENT,
-        trafficConfig: { workers_dev: true },
-      });
-      expect(runWrangler.mock.calls.filter(([args]) => args[0] === 'deploy')).toHaveLength(1);
-      expect(
-        runWrangler.mock.calls.some(([args]) => args[0] === 'versions' && args[1] === 'upload'),
-      ).toBe(false);
-      expect(
-        runWrangler.mock.calls.some(([args]) => args[0] === 'versions' && args[1] === 'deploy'),
-      ).toBe(false);
-    },
-  );
+  it('publishes explicitly atomic Durable Object deployments without a candidate stage', async () => {
+    const runWrangler = runner({
+      bootstrap: ok(`Worker Version ID: ${NEXT}\nhttps://my-worker.example.workers.dev`),
+    });
+    const result = await activateCloudflareVersion({
+      runWrangler,
+      workerName: 'my-worker',
+      verifyUploader: () => true,
+      verifyInheritedSecrets: true,
+      atomic: true,
+      workersDevSubdomain: 'example',
+      message: encodeCloudflareVersionMessage([]),
+      fetch: async () => Response.json({ ready: true }),
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      versionId: NEXT,
+      previousVersionId: CURRENT,
+      trafficConfig: { workers_dev: true },
+    });
+    expect(runWrangler.mock.calls.filter(([args]) => args[0] === 'deploy')).toHaveLength(1);
+    expect(
+      runWrangler.mock.calls.some(([args]) => args[0] === 'versions' && args[1] === 'upload'),
+    ).toBe(false);
+    expect(
+      runWrangler.mock.calls.some(([args]) => args[0] === 'versions' && args[1] === 'deploy'),
+    ).toBe(false);
+  });
   it('pins active secrets for atomic publication when the active version is the latest', async () => {
     const base = runner({
       bootstrap: ok(`Worker Version ID: ${NEXT}\nhttps://my-worker.example.workers.dev`),
@@ -1742,9 +1728,9 @@ describe('Cloudflare version activation', () => {
       traces: { enabled: true, head_sampling_rate: 0.1 },
     };
     try {
-      writeFileSync(configPath, JSON.stringify({ name: 'app', logpush: false, observability }));
+      writeFileSync(configPath, JSON.stringify({ name: 'app', observability }));
       const snapshot = readCloudflareTriggerConfig(configPath);
-      expect(snapshot).toMatchObject({ logpush: false, observability });
+      expect(snapshot).toMatchObject({ observability });
       expect(parseCloudflareVersionMessage(encodeCloudflareVersionMessage([], snapshot))).toEqual({
         schema: 2,
         migrations: [],
@@ -1756,9 +1742,7 @@ describe('Cloudflare version activation', () => {
       const publish = async (triggerConfig: CloudflareTriggerConfig, preserveTriggers = false) =>
         deployCloudflareVersionTriggers({
           runWrangler: operationFixture(async (args) => {
-            if (args[0] === 'triggers') {
-              applied = readConfigArg(args);
-            }
+            applied = readConfigArg(args);
             return ok();
           }),
           workerName: 'app',
@@ -1775,7 +1759,6 @@ describe('Cloudflare version activation', () => {
       writeFileSync(sourcePath, JSON.stringify({ name: 'app' }));
       const omitted = readCloudflareTriggerConfig(configPath, sourcePath);
       expect(omitted).not.toHaveProperty('observability');
-      expect(omitted).not.toHaveProperty('logpush');
       await publish(omitted);
       expect(applied).not.toHaveProperty('observability');
       applied = undefined;
@@ -1790,6 +1773,55 @@ describe('Cloudflare version activation', () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  it.each([false, true])(
+    'carries explicit Logpush through the version snapshot and trigger config: %s',
+    async (logpush) => {
+      const directory = mkdtempSync(join(tmpdir(), 'void-version-logpush-'));
+      const configPath = join(directory, 'wrangler.json');
+      const sourcePath = join(directory, 'source.json');
+      try {
+        writeFileSync(configPath, JSON.stringify({ name: 'app', logpush }));
+        const snapshot = readCloudflareTriggerConfig(configPath);
+        expect(snapshot.logpush).toBe(logpush);
+        expect(
+          parseCloudflareVersionMessage(encodeCloudflareVersionMessage([], snapshot)),
+        ).toMatchObject({
+          triggerConfig: { logpush },
+        });
+        let applied: Record<string, unknown> | undefined;
+        const publish = (triggerConfig: CloudflareTriggerConfig) =>
+          deployCloudflareVersionTriggers({
+            runWrangler: operationFixture(async (args) => {
+              applied = readConfigArg(args);
+              return ok();
+            }),
+            workerName: 'app',
+            configPath,
+            triggerConfig,
+          });
+        await publish(snapshot);
+        expect(applied?.logpush).toBe(logpush);
+        writeFileSync(sourcePath, JSON.stringify({ name: 'app' }));
+        const omitted = readCloudflareTriggerConfig(configPath, sourcePath);
+        expect(omitted).not.toHaveProperty('logpush');
+        await publish(omitted);
+        expect(applied).not.toHaveProperty('logpush');
+        writeFileSync(sourcePath, JSON.stringify({ name: 'app', logpush: !logpush }));
+        expect(readCloudflareTriggerConfig(configPath, sourcePath).logpush).toBe(!logpush);
+        applied = undefined;
+        await publish({ ...snapshot, preserve: true });
+        expect(applied).toBeUndefined();
+        expect(
+          parseCloudflareVersionMessage(
+            `void:${JSON.stringify({ schema: 2, migrations: [], triggerConfig: { ...snapshot, logpush: 'false' } })}`,
+          ),
+        ).toBeNull();
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('carries Email Routing addresses through the trigger snapshot and the trigger config', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'void-version-addresses-'));
@@ -2778,7 +2810,6 @@ describe('Cloudflare version activation', () => {
       'deployments',
       'versions',
       'deployments',
-      'worker',
       'deploy',
       'deployments',
       'deployments',
@@ -2937,6 +2968,7 @@ describe('Cloudflare version activation', () => {
       routes: [{ pattern: 'old.example.com', custom_domain: true }],
       crons: ['0 * * * *'],
       observability: { enabled: false },
+      logpush: true,
     });
     const liveTraffic = {
       workers_dev: false,
@@ -2977,6 +3009,7 @@ describe('Cloudflare version activation', () => {
         preservePreviewUrls: true,
         crons: ['*/10 * * * *'],
         observability: { enabled: true, traces: { enabled: true } },
+        logpush: false,
       }),
       fetch: async () => Response.json({ ready: true }),
     });
@@ -2986,11 +3019,13 @@ describe('Cloudflare version activation', () => {
       ...liveTraffic,
       triggers: { crons: ['*/10 * * * *'] },
       observability: { enabled: true, traces: { enabled: true } },
+      logpush: false,
     });
     expect(publications[1]).toMatchObject({
       ...liveTraffic,
       triggers: { crons: ['0 * * * *'] },
       observability: { enabled: false },
+      logpush: true,
     });
     expect(publications[1].queues).toEqual({ consumers: [] });
   });

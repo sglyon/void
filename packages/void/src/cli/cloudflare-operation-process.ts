@@ -22,10 +22,7 @@ import {
 } from './cf-command-values.ts';
 import { persistCfKeyringPreference, readCfSessionCredential } from './cf-session.ts';
 import { getCfCliVersion, getVoidUserAgent } from './cf-user-agent.ts';
-import {
-  publishCloudflareWorkerSettings,
-  readCloudflareWorkerSettings,
-} from './cf-worker-settings.ts';
+import { publishCloudflareWorkerSettings } from './cf-worker-settings.ts';
 import {
   cloudflareDeviceCode,
   cloudflareVerificationUrl,
@@ -1139,6 +1136,16 @@ async function workerChanges(): Promise<Result> {
     const deployed = await withBuildOutput(raw, null, (directory) =>
       runCf(['workers', 'triggers', 'deploy', '--prebuilt'], directory),
     );
+    if (deployed.status === 0 && (raw.observability !== undefined || raw.logpush !== undefined)) {
+      await publishCloudflareWorkerSettings({
+        apiBaseUrl: apiBaseUrl(),
+        accountId: accountId(),
+        workerName: name,
+        observability: raw.observability,
+        logpush: raw.logpush,
+        headers: await apiHeaders(),
+      });
+    }
     return deployed;
   }
   if (operation.type === 'versions.upload' || operation.type === 'worker.deploy') {
@@ -1148,24 +1155,19 @@ async function workerChanges(): Promise<Result> {
     }
     const source = resolve(dirname(path), raw.main);
     const request = operation;
-    const called = await withBuildOutput(
-      operation.type === 'worker.deploy' && operation.preserveWorkerSettings
-        ? { ...raw, ...operation.preserveWorkerSettings }
-        : raw,
-      source,
-      (directory) =>
-        runCf(
-          [
-            ...(request.type === 'worker.deploy' ? ['deploy'] : ['workers', 'versions', 'create']),
-            '--prebuilt',
-            // One argv item, so a message that starts with "-" is not read as a flag.
-            ...(request.message ? [`--message=${request.message}`] : []),
-            ...(request.secretsFilePath ? ['--secrets-file', request.secretsFilePath] : []),
-          ],
-          directory,
-          undefined,
-          request.interactive === true,
-        ),
+    const called = await withBuildOutput(raw, source, (directory) =>
+      runCf(
+        [
+          ...(request.type === 'worker.deploy' ? ['deploy'] : ['workers', 'versions', 'create']),
+          '--prebuilt',
+          // One argv item, so a message that starts with "-" is not read as a flag.
+          ...(request.message ? [`--message=${request.message}`] : []),
+          ...(request.secretsFilePath ? ['--secrets-file', request.secretsFilePath] : []),
+        ],
+        directory,
+        undefined,
+        request.interactive === true,
+      ),
     );
     // cf wrote an interactive upload to the terminal, so only its exit status is known.
     if (called.status !== 0 || request.interactive === true) {
@@ -1349,33 +1351,6 @@ async function main(): Promise<Result> {
   if (!operation || typeof operation !== 'object' || typeof operation.type !== 'string') {
     throw new Error('Cloudflare operation is required.');
   }
-  if (operation.type === 'worker.settings.read' || operation.type === 'worker.settings.apply') {
-    const raw = config();
-    if (
-      raw.name !== workerName() ||
-      (raw.account_id !== undefined && raw.account_id !== accountId())
-    ) {
-      throw new Error('Cloudflare Worker settings target changed.');
-    }
-    const target = {
-      apiBaseUrl: apiBaseUrl(),
-      accountId: accountId(),
-      workerName: workerName(),
-      headers: await apiHeaders(),
-    };
-    if (operation.type === 'worker.settings.read') {
-      return result(0, '', '', await readCloudflareWorkerSettings(target));
-    }
-    await publishCloudflareWorkerSettings({
-      ...target,
-      settings: operation.settings,
-      replace: operation.replace,
-      expectedSettings: operation.expectedSettings,
-      expectedVersionId: operation.expectedVersionId,
-    });
-    return result(0);
-  }
-
   if (operation.type.startsWith('auth.')) {
     return auth();
   }
