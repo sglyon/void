@@ -178,10 +178,47 @@ it.each(['read', 'patch', 'readback'] as const)(
 
 it('rejects unreadable live settings before mutation', async () => {
   const test = await fixture();
-  test.set({});
+  test.set({ logpush: 'invalid' });
   await expect(
     publishCloudflareWorkerSettings({ ...test.options, settings: { logpush: false } }),
   ).rejects.toThrow(/not readable/);
+  expect(test.requests.map(({ method }) => method)).toEqual(['GET']);
+});
+
+it.each([{}, { logpush: false }, { observability: { enabled: false } }])(
+  'accepts disabled logging surfaces omitted by the API: %j',
+  async (settings) => {
+    const test = await fixture();
+    test.set(settings);
+    expect(await readCloudflareWorkerSettings(test.options)).toEqual({
+      logpush: false,
+      observability: { enabled: false },
+    });
+    await publishCloudflareWorkerSettings({
+      ...test.options,
+      settings: { logpush: false, observability: { enabled: false } },
+    });
+    expect(test.requests.every(({ method }) => method === 'GET')).toBe(true);
+  },
+);
+
+it('refuses full-object compensation after an operator adds a nested setting', async () => {
+  const test = await fixture();
+  const candidate = { logpush: true, observability: { enabled: true } };
+  const edited = {
+    ...candidate,
+    observability: { enabled: true, traces: { enabled: true } },
+  };
+  test.set(edited);
+  await expect(
+    publishCloudflareWorkerSettings({
+      ...test.options,
+      settings: { logpush: false, observability: { enabled: false } },
+      expectedSettings: candidate,
+      replace: true,
+    }),
+  ).rejects.toThrow(/changed/);
+  expect(test.read()).toEqual(edited);
   expect(test.requests.map(({ method }) => method)).toEqual(['GET']);
 });
 

@@ -216,6 +216,7 @@ function runner(overrides?: {
   triggerRollback?: CloudflareCommandResult;
   rollback?: CloudflareCommandResult;
   versions?: CloudflareCommandResult;
+  settings?: CloudflareCommandResult;
 }) {
   let deployCalls = 0;
   let triggerCalls = 0;
@@ -228,7 +229,8 @@ function runner(overrides?: {
   return operationFixture((args: Array<string>) => {
     if (args[0] === 'worker' && args[1] === 'settings') {
       return args[2] === 'read'
-        ? ok(JSON.stringify({ logpush: false, observability: { enabled: false } }))
+        ? (overrides?.settings ??
+            ok(JSON.stringify({ logpush: false, observability: { enabled: false } })))
         : ok();
     }
     if (args[0] === 'deployments') {
@@ -714,34 +716,38 @@ describe('Cloudflare version activation', () => {
     expect(fixture.events).toContain('upload');
   });
 
-  it('publishes explicitly atomic Durable Object deployments without a candidate stage', async () => {
-    const runWrangler = runner({
-      bootstrap: ok(`Worker Version ID: ${NEXT}\nhttps://my-worker.example.workers.dev`),
-    });
-    const result = await activateCloudflareVersion({
-      runWrangler,
-      workerName: 'my-worker',
-      verifyUploader: () => true,
-      verifyInheritedSecrets: true,
-      atomic: true,
-      workersDevSubdomain: 'example',
-      message: encodeCloudflareVersionMessage([]),
-      fetch: async () => Response.json({ ready: true }),
-    });
-    expect(result).toMatchObject({
-      ok: true,
-      versionId: NEXT,
-      previousVersionId: CURRENT,
-      trafficConfig: { workers_dev: true },
-    });
-    expect(runWrangler.mock.calls.filter(([args]) => args[0] === 'deploy')).toHaveLength(1);
-    expect(
-      runWrangler.mock.calls.some(([args]) => args[0] === 'versions' && args[1] === 'upload'),
-    ).toBe(false);
-    expect(
-      runWrangler.mock.calls.some(([args]) => args[0] === 'versions' && args[1] === 'deploy'),
-    ).toBe(false);
-  });
+  it.each([{}, { logpush: false }, { observability: { enabled: false } }])(
+    'publishes explicitly atomic Durable Object deployments with optional live settings: %j',
+    async (settings) => {
+      const runWrangler = runner({
+        bootstrap: ok(`Worker Version ID: ${NEXT}\nhttps://my-worker.example.workers.dev`),
+        settings: ok(JSON.stringify(settings)),
+      });
+      const result = await activateCloudflareVersion({
+        runWrangler,
+        workerName: 'my-worker',
+        verifyUploader: () => true,
+        verifyInheritedSecrets: true,
+        atomic: true,
+        workersDevSubdomain: 'example',
+        message: encodeCloudflareVersionMessage([]),
+        fetch: async () => Response.json({ ready: true }),
+      });
+      expect(result).toMatchObject({
+        ok: true,
+        versionId: NEXT,
+        previousVersionId: CURRENT,
+        trafficConfig: { workers_dev: true },
+      });
+      expect(runWrangler.mock.calls.filter(([args]) => args[0] === 'deploy')).toHaveLength(1);
+      expect(
+        runWrangler.mock.calls.some(([args]) => args[0] === 'versions' && args[1] === 'upload'),
+      ).toBe(false);
+      expect(
+        runWrangler.mock.calls.some(([args]) => args[0] === 'versions' && args[1] === 'deploy'),
+      ).toBe(false);
+    },
+  );
   it('pins active secrets for atomic publication when the active version is the latest', async () => {
     const base = runner({
       bootstrap: ok(`Worker Version ID: ${NEXT}\nhttps://my-worker.example.workers.dev`),

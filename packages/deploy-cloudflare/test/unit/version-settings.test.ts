@@ -21,7 +21,14 @@ const triggers: CloudflareTriggerConfig = {
   workflows: [],
 };
 
-async function deployment(failure: 'none' | 'settings' | 'read' | 'operator', legacy = false) {
+async function deployment(
+  failure: 'none' | 'settings' | 'read' | 'operator' | 'triggers',
+  legacy = false,
+  desiredSettings: CloudflareWorkerSettings = {
+    logpush: false,
+    observability: { enabled: true, logs: { destinations: [] } },
+  },
+) {
   const live: CloudflareWorkerSettings = {
     logpush: true,
     observability: {
@@ -74,7 +81,7 @@ async function deployment(failure: 'none' | 'settings' | 'read' | 'operator', le
       return ok();
     }
     if (operation.type === 'triggers.deploy') {
-      return ok();
+      return failure === 'triggers' && traffic === NEXT ? { ...ok(), status: 1 } : ok();
     }
     if (operation.type === 'worker.settings.apply') {
       expect(operation.expectedVersionId).toBe(traffic);
@@ -101,8 +108,7 @@ async function deployment(failure: 'none' | 'settings' | 'read' | 'operator', le
     verifyUploader: () => true,
     message: encodeCloudflareVersionMessage([], {
       ...triggers,
-      logpush: false,
-      observability: { enabled: true, logs: { destinations: [] } },
+      ...desiredSettings,
     }),
     readinessAttempts: 1,
     fetch: async () => Response.json({ ready: true }),
@@ -124,6 +130,16 @@ it('captures settings before upload and applies them only after activation', asy
     },
   });
 });
+
+it.each(['settings', 'triggers'] as const)(
+  'captures live annotation-only settings for compensation after %s failure',
+  async (failure) => {
+    const test = await deployment(failure, false, failure === 'settings' ? { logpush: false } : {});
+    expect(test.result).toMatchObject({ ok: false, rollback: 'succeeded' });
+    expect(test.settings).toEqual(test.live);
+    expect(test.traffic).toBe(CURRENT);
+  },
+);
 
 it.each([false, true])(
   'restores actual live settings after failure, including older metadata (legacy=%s)',

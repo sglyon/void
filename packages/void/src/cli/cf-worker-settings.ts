@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import {
   configuredWorkerSettings,
   mergeWorkerSettings,
@@ -85,7 +86,14 @@ export async function publishCloudflareWorkerSettings(
     return;
   }
   const baseline = options.expectedSettings;
-  if (baseline && !workerSettingsMatch(baseline, current)) {
+  if (
+    baseline &&
+    !Object.entries(baseline).every(([key, value]) =>
+      options.replace
+        ? isDeepStrictEqual(value, current[key as keyof CloudflareWorkerSettings])
+        : workerSettingsMatch(value, current[key as keyof CloudflareWorkerSettings]),
+    )
+  ) {
     throw new Error(
       'Cloudflare Worker settings changed during deployment; refusing to overwrite them.',
     );

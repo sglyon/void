@@ -1110,7 +1110,8 @@ async function activateCloudflareVersionWithSecretsFile(
     previousVersionId &&
     !options.preserveTriggers &&
     !desiredTriggerConfig.preserve &&
-    Object.keys(desiredSettings).length > 0
+    (Object.keys(desiredSettings).length > 0 ||
+      Object.keys(configuredWorkerSettings(versionedPreviousTriggerConfig ?? {})).length > 0)
   ) {
     const captured = await options.runWrangler(
       {
@@ -1121,12 +1122,7 @@ async function activateCloudflareVersionWithSecretsFile(
       { capture: true },
     );
     const live = isCleanCommandExit(captured) ? parseWorkerSettings(captured.data) : null;
-    if (
-      !live ||
-      Object.keys(desiredSettings).some(
-        (key) => live[key as keyof CloudflareWorkerSettings] === undefined,
-      )
-    ) {
+    if (!live) {
       return {
         ok: false,
         reason: 'status-failed',
@@ -1135,12 +1131,9 @@ async function activateCloudflareVersionWithSecretsFile(
       };
     }
     options = { ...options, liveWorkerSettings: live };
-    const settings = Object.fromEntries(
-      Object.keys(desiredSettings).map((key) => [key, live[key as keyof CloudflareWorkerSettings]]),
-    );
     versionedPreviousTriggerConfigWithTraffic = {
       ...(versionedPreviousTriggerConfigWithTraffic ?? { ...desiredTriggerConfig, preserve: true }),
-      ...settings,
+      ...live,
     };
   }
   const previousTriggerConfig = triggerConfigWithQueueConsumerCleanup(
@@ -2065,17 +2058,6 @@ async function bootstrapFirstDeployment(
         diagnostic: 'The live Worker settings could not be preserved before publication.',
       };
     }
-  }
-  if (
-    previousVersionId &&
-    (preserveWorkerSettings?.logpush === undefined ||
-      preserveWorkerSettings.observability === undefined)
-  ) {
-    return {
-      ok: false,
-      reason: 'status-failed',
-      diagnostic: 'The live Worker logging settings are incomplete; publication was stopped.',
-    };
   }
   if (previousVersionId && preserveWorkerSettings) {
     const desired = desiredTriggerConfigFor(

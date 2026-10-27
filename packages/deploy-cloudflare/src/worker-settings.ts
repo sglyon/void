@@ -16,23 +16,20 @@ export function configuredWorkerSettings(
   };
 }
 
-/** Null observability means logging is disabled, including on older Workers. */
+/** Older Workers can omit disabled logging surfaces from the API response. */
 export function parseWorkerSettings(value: unknown): CloudflareWorkerSettings | null {
   if (
     !isRecord(value) ||
     (value.logpush !== undefined && typeof value.logpush !== 'boolean') ||
     (value.observability !== undefined &&
       value.observability !== null &&
-      !isRecord(value.observability)) ||
-    (value.logpush === undefined && value.observability === undefined)
+      !isRecord(value.observability))
   ) {
     return null;
   }
   return {
-    ...(value.logpush === undefined ? {} : { logpush: value.logpush }),
-    ...(value.observability === undefined
-      ? {}
-      : { observability: value.observability ?? { enabled: false } }),
+    logpush: value.logpush ?? false,
+    observability: value.observability ?? { enabled: false },
   };
 }
 
