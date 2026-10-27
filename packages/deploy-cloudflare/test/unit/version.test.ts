@@ -62,6 +62,9 @@ function sdkDraftActivation(source: Record<string, unknown> = voidSecretDraftVer
       if (operation.type === 'deployments.status') {
         return { ...ok(), data: { versions: traffic } };
       }
+      if (operation.type === 'worker.settings.read') {
+        return { ...ok(), data: { logpush: false, observability: { enabled: false } } };
+      }
       if (operation.type === 'versions.list') {
         return {
           ...ok(),
@@ -223,6 +226,11 @@ function runner(overrides?: {
   ];
   let uploaded = false;
   return operationFixture((args: Array<string>) => {
+    if (args[0] === 'worker' && args[1] === 'settings') {
+      return args[2] === 'read'
+        ? ok(JSON.stringify({ logpush: false, observability: { enabled: false } }))
+        : ok();
+    }
     if (args[0] === 'deployments') {
       statusCalls++;
       if (statusCalls === 1 && overrides?.status) {
@@ -1728,9 +1736,9 @@ describe('Cloudflare version activation', () => {
       traces: { enabled: true, head_sampling_rate: 0.1 },
     };
     try {
-      writeFileSync(configPath, JSON.stringify({ name: 'app', observability }));
+      writeFileSync(configPath, JSON.stringify({ name: 'app', logpush: false, observability }));
       const snapshot = readCloudflareTriggerConfig(configPath);
-      expect(snapshot).toMatchObject({ observability });
+      expect(snapshot).toMatchObject({ logpush: false, observability });
       expect(parseCloudflareVersionMessage(encodeCloudflareVersionMessage([], snapshot))).toEqual({
         schema: 2,
         migrations: [],
@@ -1742,7 +1750,9 @@ describe('Cloudflare version activation', () => {
       const publish = async (triggerConfig: CloudflareTriggerConfig, preserveTriggers = false) =>
         deployCloudflareVersionTriggers({
           runWrangler: operationFixture(async (args) => {
-            applied = readConfigArg(args);
+            if (args[0] === 'triggers') {
+              applied = readConfigArg(args);
+            }
             return ok();
           }),
           workerName: 'app',
@@ -1759,6 +1769,7 @@ describe('Cloudflare version activation', () => {
       writeFileSync(sourcePath, JSON.stringify({ name: 'app' }));
       const omitted = readCloudflareTriggerConfig(configPath, sourcePath);
       expect(omitted).not.toHaveProperty('observability');
+      expect(omitted).not.toHaveProperty('logpush');
       await publish(omitted);
       expect(applied).not.toHaveProperty('observability');
       applied = undefined;
@@ -2761,6 +2772,7 @@ describe('Cloudflare version activation', () => {
       'deployments',
       'versions',
       'deployments',
+      'worker',
       'deploy',
       'deployments',
       'deployments',

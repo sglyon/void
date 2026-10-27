@@ -24,7 +24,10 @@ import {
   uploadPinnedCloudflareVersion,
   type CfCommand,
 } from './cf-version-api.ts';
-import { publishCloudflareObservability } from './cf-worker-settings.ts';
+import {
+  publishCloudflareWorkerSettings,
+  readCloudflareWorkerSettings,
+} from './cf-worker-settings.ts';
 import { isCleanCloudflareExit } from './cloudflare-process.ts';
 
 function failed(message: string): CloudflareCommandResult {
@@ -461,6 +464,46 @@ export function createCfVersionRunner(options: {
   };
 
   return async (operation, command) => {
+    if (operation.type === 'worker.settings.read' || operation.type === 'worker.settings.apply') {
+      const credentials = options.pinnedUpload;
+      if (operation.workerName !== workerName || !credentials || !credentials.verifyUploader()) {
+        return failed('The Cloudflare settings target or publisher changed.');
+      }
+      try {
+        const token = await credentials.getToken();
+        if (!token || !credentials.verifyUploader()) {
+          return failed('Cloudflare session is unavailable for Worker settings.');
+        }
+        const target = {
+          apiBaseUrl: credentials.apiBaseUrl,
+          accountId: credentials.accountId,
+          workerName,
+          headers: { Authorization: 'Bearer ' + token },
+          verify: credentials.verifyUploader,
+        };
+        if (operation.type === 'worker.settings.read') {
+          return {
+            status: 0,
+            stdout: '',
+            stderr: '',
+            data: await readCloudflareWorkerSettings(target),
+          };
+        }
+        await publishCloudflareWorkerSettings({
+          ...target,
+          settings: operation.settings,
+          replace: operation.replace,
+          expectedSettings: operation.expectedSettings,
+          expectedVersionId: operation.expectedVersionId,
+        });
+        return { status: 0, stdout: '', stderr: '' };
+      } catch (cause) {
+        return failed(
+          cause instanceof Error ? cause.message : 'Cloudflare settings operation failed.',
+        );
+      }
+    }
+
     if (operation.type === 'deployments.status') {
       const result = await run(['workers', 'deployments', 'list', '--worker', workerName], true);
       if (!isCleanCloudflareExit(result)) {
@@ -693,18 +736,51 @@ export function createCfVersionRunner(options: {
       if (output.activeSecrets) {
         return uploadPinnedVersion(operation, true);
       }
-      return uploadedResult(
-        await run(
-          [
-            'deploy',
-            '--prebuilt',
-            // One argv item, so a message that starts with "-" is not read as a flag.
-            ...(operation.message ? [`--message=${operation.message}`] : []),
-            ...(operation.secretsFilePath ? ['--secrets-file', operation.secretsFilePath] : []),
-          ],
-          command.capture,
-        ),
-      );
+      let directory = output.directory;
+      let scratch: string | undefined;
+      try {
+        if (operation.preserveWorkerSettings) {
+          scratch = mkdtempSync(join(tmpdir(), 'void-cf-settings-'));
+          cpSync(join(output.directory, '.cloudflare'), join(scratch, '.cloudflare'), {
+            recursive: true,
+          });
+          directory = scratch;
+          const path = getWorkerConfigPath(directory);
+          const worker = parseJson(readFileSync(path, 'utf8'));
+          if (!record(worker)) {
+            return failed('The Worker settings preservation artifact was not readable.');
+          }
+          const migrated = migrateBuiltWranglerConfig({
+            name: workerName,
+            compatibility_date: worker.compatibilityDate,
+            ...operation.preserveWorkerSettings,
+          }).worker;
+          if (!migrated) {
+            return failed('The Worker settings preservation artifact was not convertible.');
+          }
+          worker.logpush = migrated.logpush;
+          worker.observability = migrated.observability;
+          writeFileSync(path, JSON.stringify(worker), { mode: 0o600 });
+          await readBuildOutput(directory);
+        }
+        return uploadedResult(
+          await run(
+            [
+              'deploy',
+              '--prebuilt',
+              // One argv item, so a message that starts with "-" is not read as a flag.
+              ...(operation.message ? [`--message=${operation.message}`] : []),
+              ...(operation.secretsFilePath ? ['--secrets-file', operation.secretsFilePath] : []),
+            ],
+            command.capture,
+            directory,
+          ),
+        );
+      } finally {
+        if (scratch) {
+          rmSync(scratch, { recursive: true, force: true });
+        }
+      }
     }
 
     if (operation.type === 'triggers.deploy') {
@@ -780,29 +856,6 @@ export function createCfVersionRunner(options: {
           command.capture,
           directory,
         );
-        if (isCleanCloudflareExit(deployed) && raw.observability !== undefined) {
-          const credentials = options.pinnedUpload;
-          if (!credentials || !credentials.verifyUploader()) {
-            return failed('The Cloudflare settings publisher is unavailable.');
-          }
-          try {
-            const token = await credentials.getToken();
-            if (!token || !credentials.verifyUploader()) {
-              return failed('Cloudflare session is unavailable for publishing Worker settings.');
-            }
-            await publishCloudflareObservability({
-              apiBaseUrl: credentials.apiBaseUrl,
-              accountId: credentials.accountId,
-              workerName,
-              observability: raw.observability,
-              headers: { Authorization: `Bearer ${token}` },
-            });
-          } catch (cause) {
-            return failed(
-              cause instanceof Error ? cause.message : 'Cloudflare settings update failed.',
-            );
-          }
-        }
         return deployed;
       } finally {
         rmSync(directory, { recursive: true, force: true });

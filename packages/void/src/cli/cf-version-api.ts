@@ -1082,6 +1082,7 @@ export async function uploadPinnedCloudflareVersion(options: {
         'assets',
         'domains',
         'observability',
+        'logpush',
         'workersDev',
         'previewUrls',
         'unsafe',

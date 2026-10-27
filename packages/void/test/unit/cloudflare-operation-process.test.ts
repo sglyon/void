@@ -106,7 +106,7 @@ function runOperation(
 }
 
 it.each([true, false])(
-  'publishes observability from the trigger operation (enabled=%s)',
+  'publishes and verifies explicit settings through the operation transport (enabled=%s)',
   async (enabled) => {
     const directory = temporaryDirectory('void-cf-observability-');
     const configPath = join(directory, 'wrangler.json');
@@ -120,6 +120,7 @@ it.each([true, false])(
         observability,
       }),
     );
+    let liveObservability: unknown = { enabled: !enabled };
     const patches: Array<{ path: string; body: unknown; authorization?: string }> = [];
     const api = await listen(
       createServer(async (request, response) => {
@@ -128,6 +129,7 @@ it.each([true, false])(
           chunks.push(Buffer.from(chunk));
         }
         if (request.method === 'PATCH') {
+          liveObservability = observability;
           patches.push({
             path: request.url ?? '',
             body: JSON.parse(Buffer.concat(chunks).toString()),
@@ -138,9 +140,11 @@ it.each([true, false])(
         response.end(
           JSON.stringify({
             success: true,
-            result: request.url?.endsWith('/workers/subdomain')
-              ? { subdomain: 'fixture' }
-              : { subdomain: { enabled: false, previews_enabled: false }, observability },
+            result: request.url?.endsWith('/script-settings')
+              ? { logpush: false, observability: liveObservability }
+              : request.url?.endsWith('/workers/subdomain')
+                ? { subdomain: 'fixture' }
+                : { subdomain: { enabled: false, previews_enabled: false }, observability },
           }),
         );
       }),
@@ -148,7 +152,8 @@ it.each([true, false])(
     const output = await runOperation(
       directory,
       {
-        type: 'triggers.deploy',
+        type: 'worker.settings.apply',
+        settings: { observability },
         workerName: 'test-worker',
         configPath,
       },

@@ -1,4 +1,5 @@
 /** Typed provider operations shared by app deployment and platform installation. */
+import type { CloudflareWorkerSettings } from './worker-settings.ts';
 type ConfigTarget = { configPath?: string };
 type WorkerTarget = ConfigTarget & { workerName?: string };
 
@@ -43,6 +44,8 @@ export type CloudflareOperation =
     } & WorkerTarget)
   | ({
       type: 'versions.upload' | 'worker.deploy';
+      /** Keep provider deploy defaults from changing live Worker-wide settings. */
+      preserveWorkerSettings?: CloudflareWorkerSettings;
       message?: string;
       secretsFilePath?: string;
       assetsDirectory?: string;
@@ -55,6 +58,15 @@ export type CloudflareOperation =
       interactive?: boolean;
     } & WorkerTarget)
   | ({ type: 'triggers.deploy'; assets?: boolean } & WorkerTarget)
+  | ({ type: 'worker.settings.read' } & WorkerTarget)
+  | ({
+      type: 'worker.settings.apply';
+      /** Restore the complete captured object rather than merge new fields into it. */
+      replace?: boolean;
+      settings: CloudflareWorkerSettings;
+      expectedSettings?: CloudflareWorkerSettings;
+      expectedVersionId?: string;
+    } & WorkerTarget)
   | ({ type: 'triggers.clear-crons' | 'triggers.clear-domains' } & WorkerTarget)
   | ({ type: 'tail'; search?: string; versionId?: string; status?: 'error' } & WorkerTarget);
 

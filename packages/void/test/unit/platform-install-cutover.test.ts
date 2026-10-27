@@ -4,7 +4,11 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { CloudflareOperation } from '@void/deploy-cloudflare';
+import {
+  mergeWorkerSettings,
+  type CloudflareOperation,
+  type CloudflareWorkerSettings,
+} from '@void/deploy-cloudflare';
 import {
   createPlatformDeploymentManifest,
   PLATFORM_DISABLED_KEY,
@@ -95,6 +99,7 @@ async function createFakeCloudflare() {
     string,
     { deployments: Array<FakeDeployment>; versions: Map<string, FakeVersion> }
   >();
+  const settings = new Map<string, CloudflareWorkerSettings>();
   const kv = new Map<string, string>();
   const r2 = new Map<string, string>();
   const named = new Map<string, Map<string, string>>();
@@ -193,6 +198,17 @@ async function createFakeCloudflare() {
     if (args.type === 'versions.view') {
       const version = workers.get(worker!)?.versions.get(args.versionId);
       return version ? ok(version) : failed('version not found');
+    }
+    if (args.type === 'worker.settings.read') {
+      return ok(settings.get(worker!) ?? { logpush: false, observability: { enabled: false } });
+    }
+    if (args.type === 'worker.settings.apply') {
+      const before = settings.get(worker!) ?? { logpush: false, observability: { enabled: false } };
+      settings.set(
+        worker!,
+        args.replace ? args.settings : mergeWorkerSettings(before, args.settings),
+      );
+      return ok();
     }
     if (args.type === 'triggers.deploy') {
       return ok();
